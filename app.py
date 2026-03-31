@@ -138,6 +138,10 @@ if up_f:
         if line_data:
             st.success(f"Successfully processed {len(line_data)} lines!")
             for ln, robots in line_data.items(): st.write(f"- **{ln}**: {len(robots)} robots found")
+            
+            # Generate the ZIP content
+            zip_bytes = process_and_zip(line_data)
+            
             # Clean the filename for the zip download
             safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', os.path.splitext(up_f.name)[0])
             st.download_button(
