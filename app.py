@@ -65,7 +65,6 @@ def update_signal_map(robot_data, robot_name, di_list, do_list):
             robot_data[robot_name]['DO'][index] = (new_com, new_st)
 
 def generate_excel_bytes(robot_data):
-    # Generates a single Excel workbook in memory for a group of robots
     output = io.BytesIO()
     gf, rf = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid'), PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -96,7 +95,6 @@ def generate_excel_bytes(robot_data):
     return output.getvalue()
 
 def process_and_zip(all_robot_line_data):
-    # Packages multiple Excel workbooks into a single ZIP file
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
         for line_name, robot_data in all_robot_line_data.items():
@@ -104,89 +102,46 @@ def process_and_zip(all_robot_line_data):
             zip_file.writestr(f"{line_name}.xlsx", excel_bytes)
     return zip_buffer.getvalue()
 
-# Application Runners
 def run_zip_processing(uploaded_file):
-    line_data = {} # line_name -> robot_data
+    line_data = {}
     with zipfile.ZipFile(uploaded_file, 'r') as z:
         for name in z.namelist():
             if name.lower().endswith('.ls'):
                 parts = [p for p in name.split('/') if p]
                 if 'LS' in [p.upper() for p in parts]:
                     ls_idx = [i for i, p in enumerate(parts) if p.upper() == 'LS'][0]
-                    # Line name is the folder above the robot folder? 
-                    # If Backup/YJC MB/602A/LS/file.ls -> parts=['Backup','YJC MB','602A','LS','file.ls']
-                    # robot_name = 602A (idx-1), line_name = YJC MB (idx-2)
                     robot_name = parts[ls_idx-1] if ls_idx > 0 else "Robot"
                     line_name = parts[ls_idx-2] if ls_idx > 1 else "Main"
                 else: 
                     robot_name = parts[-2] if len(parts) > 1 else "Root"
                     line_name = parts[-3] if len(parts) > 2 else "Main"
-                
                 if line_name not in line_data: line_data[line_name] = {}
                 try:
                     with z.open(name) as f:
                         content = f.read().decode('latin-1', errors='replace')
-                        di_list, do_list = parse_content(content)
-                        update_signal_map(line_data[line_name], robot_name, di_list, do_list)
+                        di_l, do_l = parse_content(content)
+                        update_signal_map(line_data[line_name], robot_name, di_l, do_l)
                 except: pass
     return line_data
 
-def run_local_processing(root_path):
-    line_data = {}
-    exclude = {'build', 'dist', '__pycache__', '.git', '.pytest_cache'}
-    for root, dirs, files in os.walk(root_path):
-        dirs[:] = [d for d in dirs if d not in exclude]
-        if 'LS' in [d.upper() for d in dirs]:
-            # Identify line and robot
-            rel_path = os.path.relpath(root, root_path)
-            parts = [p for p in rel_path.split(os.sep) if p and p != '.']
-            # If root_path is "Backup" and we found "Backup/YJC MB/602A/LS"
-            # rel_path = "YJC MB/602A/LS" -> parts=["YJC MB","602A","LS"]
-            # line_name = parts[0], robot_name = parts[1]
-            line_name = parts[0] if parts else "Main"
-            robot_name = parts[1] if len(parts) > 1 else os.path.basename(root)
-            
-            if line_name not in line_data: line_data[line_name] = {}
-            for file in os.listdir(root):
-                if file.lower().endswith('.ls'):
-                    try:
-                        with open(os.path.join(root, file), 'r', encoding='latin-1', errors='replace') as f:
-                            di_l, do_l = parse_content(f.read())
-                            update_signal_map(line_data[line_name], robot_name, di_l, do_l)
-                    except: pass
-            dirs[:] = [] # stop deep walk for this robot
-    return line_data
-
-# UI Application
+# UI Application - Simple Cloud Version
 st.title("🤖 Robot Signal Extractor")
 st.markdown("##### Professional Multi-Line Extraction Tool")
 
-t1, t2 = st.tabs(["🚀 Cloud Mode (Zip Upload)", "🏠 Local Mode (Folder Path)"])
+# Only Zip Upload for GitHub Version
+st.info("💡 Please upload a **.ZIP** file of your robot backup or the entire robot line folder.")
+up_f = st.file_uploader("Upload robot backup ZIP", type="zip")
 
-with t1:
-    up_f = st.file_uploader("Upload robot backup ZIP", type="zip")
-    if up_f:
-        with st.spinner("Processing multiple robot lines..."):
-            line_data = run_zip_processing(up_f)
-            if line_data:
-                st.success(f"Successfully processed {len(line_data)} lines!")
-                for ln, robots in line_data.items(): st.write(f"- **{ln}**: {len(robots)} robots found")
-                zip_bytes = process_and_zip(line_data)
-                st.download_button("📥 Download Separate Excel Files (ZIP)", zip_bytes, f"Signal_Reports_{os.path.splitext(up_f.name)[0]}.zip", "application/zip")
-
-with t2:
-    loc_p = st.text_input("Enter Root Folder Path (e.g. C:\\Backup)", "")
-    if st.button("🚀 Fast Scan Multiple Lines"):
-        if os.path.exists(loc_p):
-            with st.spinner("Scanning directory for all lines..."):
-                line_data = run_local_processing(loc_p)
-                if line_data:
-                    st.success(f"Detected {len(line_data)} robot lines!")
-                    for ln, robots in line_data.items(): st.write(f"- **{ln}**: {len(robots)} robots")
-                    zip_bytes = process_and_zip(line_data)
-                    st.download_button("📥 Download Separate Excel Files (ZIP)", zip_bytes, "MultiLine_Signal_Reports.zip", "application/zip")
-                else: st.error("No valid robot backups found.")
-        else: st.error("Invalid path.")
+if up_f:
+    with st.spinner("Processing multiple robot lines..."):
+        line_data = run_zip_processing(up_f)
+        if line_data:
+            st.success(f"Successfully processed {len(line_data)} lines!")
+            for ln, robots in line_data.items(): st.write(f"- **{ln}**: {len(robots)} robots found")
+            zip_bytes = process_and_zip(line_data)
+            st.download_button("📥 Download Separate Excel Files (ZIP)", zip_bytes, f"Signal_Reports_{os.path.splitext(up_f.name)[0]}.zip", "application/zip")
+        else:
+            st.error("No valid robot backups found in the ZIP.")
 
 st.markdown("---")
 st.caption("Powered by Advanced Agentic Automation")
