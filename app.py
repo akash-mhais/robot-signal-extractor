@@ -138,8 +138,14 @@ if up_f:
         if line_data:
             st.success(f"Successfully processed {len(line_data)} lines!")
             for ln, robots in line_data.items(): st.write(f"- **{ln}**: {len(robots)} robots found")
-            zip_bytes = process_and_zip(line_data)
-            st.download_button("📥 Download Separate Excel Files (ZIP)", zip_bytes, f"Signal_Reports_{os.path.splitext(up_f.name)[0]}.zip", "application/zip")
+            # Clean the filename for the zip download
+            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', os.path.splitext(up_f.name)[0])
+            st.download_button(
+                label="📥 Download Separate Excel Files (ZIP)",
+                data=zip_bytes,
+                file_name=f"Signal_Reports_{safe_name}.zip",
+                mime="application/zip"
+            )
         else:
             st.error("No valid robot backups found in the ZIP.")
 
