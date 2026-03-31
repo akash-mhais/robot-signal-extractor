@@ -143,12 +143,13 @@ if up_f:
             zip_bytes = process_and_zip(line_data)
             
             # Clean the filename for the zip download
-            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', os.path.splitext(up_f.name)[0])
+            # Use a simple filename and unique key to ensure browser compatibility
             st.download_button(
                 label="📥 Download Separate Excel Files (ZIP)",
                 data=zip_bytes,
-                file_name=f"Signal_Reports_{safe_name}.zip",
-                mime="application/zip"
+                file_name="Signal_Table.zip",
+                mime="application/zip",
+                key="download_zip_button"
             )
         else:
             st.error("No valid robot backups found in the ZIP.")
