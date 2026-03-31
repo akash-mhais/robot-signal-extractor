@@ -9,44 +9,20 @@ from openpyxl.styles import PatternFill
 # Page Configuration
 st.set_page_config(page_title="Robot Signal Extractor", page_icon="🤖", layout="wide")
 
-# Custom CSS for Premium Look
+# Custom CSS
 st.markdown("""
     <style>
-    .main {
-        background-color: #0e1117;
-    }
-    .stButton>button {
-        width: 100%;
-        border-radius: 5px;
-        height: 3em;
-        background-color: #007bff;
-        color: white;
-        font-weight: bold;
-    }
-    .stDownloadButton>button {
-        width: 100%;
-        border-radius: 5px;
-        height: 3em;
-        background-color: #28a745;
-        color: white;
-        font-weight: bold;
-    }
-    .css-1offfwp {
-        background-color: rgba(255, 255, 255, 0.05);
-        border-radius: 10px;
-        padding: 20px;
-        backdrop-filter: blur(10px);
-    }
+    .main { background-color: #0e1117; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #007bff; color: white; font-weight: bold; }
+    .stDownloadButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #28a745; color: white; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-# Parsing Logic (Adapted for Zip)
-def extract_signals_from_text(content):
-    di_entries = []
-    do_entries = []
+# Extraction & Signal Merging Engine
+def parse_content(content):
+    di_entries, do_entries = [], []
     di_pattern = re.compile(r'DI\[(\d+)(?::([^\]]*))?\](?:\s*(?:=|==|<>|:)\s*(ON|OFF))?', re.IGNORECASE)
     do_pattern = re.compile(r'DO\[(\d+)(?::([^\]]*))?\](?:\s*(?:=|==|<>|:)\s*(ON|OFF))?', re.IGNORECASE)
-    
     for line in content.splitlines():
         for match in di_pattern.finditer(line):
             index = int(match.group(1))
@@ -60,171 +36,157 @@ def extract_signals_from_text(content):
             do_entries.append((index, comment, state))
     return di_entries, do_entries
 
-def process_zip_backup(uploaded_file):
-    with zipfile.ZipFile(uploaded_file, 'r') as z:
-        file_list = z.namelist()
-        
-        # Identify robot folders (those containing an 'LS' folder or .ls files)
-        # We group by the folder name before /LS/
-        robot_data = {} # robot_name -> list of signal entries
-        
-        for name in file_list:
-            if name.lower().endswith('.ls'):
-                # Extract robot name from path
-                # Pattern: common/path/ROBOT_NAME/LS/file.ls or ROBOT_NAME/file.ls
-                path_parts = name.split('/')
-                robot_name = "Unknown"
-                
-                # Check for /LS/ folder
-                if 'LS' in [p.upper() for p in path_parts]:
-                    ls_idx = [i for i, p in enumerate(path_parts) if p.upper() == 'LS'][0]
-                    if ls_idx > 0:
-                        robot_name = path_parts[ls_idx - 1]
-                    else:
-                        robot_name = "Main"
-                else:
-                    # Use immediate parent folder as robot name
-                    if len(path_parts) > 1:
-                        robot_name = path_parts[-2]
-                    else:
-                        robot_name = "Root"
+def update_signal_map(robot_data, robot_name, di_list, do_list):
+    if robot_name not in robot_data:
+        robot_data[robot_name] = {'DI': {}, 'DO': {}}
+    for index, comment, state in di_list:
+        if not comment and not state: continue
+        curr_com, curr_st = robot_data[robot_name]['DI'].get(index, ("", ""))
+        new_com = comment or curr_com
+        new_st = curr_st
+        prefix_match = re.match(r'^(ON|OFF)\s*:', new_com, re.IGNORECASE)
+        if prefix_match:
+            new_st = prefix_match.group(1).upper()
+            new_com = re.sub(r'^(ON|OFF)\s*:\s*', '', new_com, flags=re.IGNORECASE)
+        elif state and not new_st: new_st = state
+        if not curr_com or new_st or len(new_com) > len(curr_com):
+            robot_data[robot_name]['DI'][index] = (new_com, new_st)
+    for index, comment, state in do_list:
+        if not comment and not state: continue
+        curr_com, curr_st = robot_data[robot_name]['DO'].get(index, ("", ""))
+        new_com = comment or curr_com
+        new_st = curr_st
+        prefix_match = re.match(r'^(ON|OFF)\s*:', new_com, re.IGNORECASE)
+        if prefix_match:
+            new_st = prefix_match.group(1).upper()
+            new_com = re.sub(r'^(ON|OFF)\s*:\s*', '', new_com, flags=re.IGNORECASE)
+        elif state and not new_st: new_st = state
+        if not curr_com or new_st or len(new_com) > len(curr_com):
+            robot_data[robot_name]['DO'][index] = (new_com, new_st)
 
-                # Read and parse
+def generate_excel_bytes(robot_data):
+    # Generates a single Excel workbook in memory for a group of robots
+    output = io.BytesIO()
+    gf, rf = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid'), PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        for robot_name, signals in robot_data.items():
+            all_di, all_do = signals['DI'], signals['DO']
+            has_state = any(s for _, s in all_di.values()) or any(s for _, s in all_do.values())
+            di_rows = [[f"DI {i}", all_di[i][1], all_di[i][0]] if has_state else [f"DI {i}", all_di[i][0]] for i in sorted(all_di.keys())]
+            do_rows = [[f"DO {i}", all_do[i][1], all_do[i][0]] if has_state else [f"DO {i}", all_do[i][0]] for i in sorted(all_do.keys())]
+            if not di_rows and not do_rows: continue
+            df_di = pd.DataFrame(di_rows, columns=['DI', 'State', 'Comment']) if has_state else pd.DataFrame(di_rows, columns=['DI', 'Comment'])
+            df_do = pd.DataFrame(do_rows, columns=['DO', 'State', 'Comment']) if has_state else pd.DataFrame(do_rows, columns=['DO', 'Comment'])
+            max_r = max(len(df_di), len(df_do))
+            col_sp = pd.DataFrame([''] * max_r, columns=[' '])
+            final_df = pd.concat([df_do.reindex(range(max_r)).fillna(''), col_sp, df_di.reindex(range(max_r)).fillna('')], axis=1)
+            sheet_name = str(robot_name)[:31]
+            final_df.to_excel(writer, sheet_name=sheet_name, index=False)
+            ws = writer.sheets[sheet_name]
+            if has_state:
+                ws.column_dimensions['A'].width, ws.column_dimensions['B'].width, ws.column_dimensions['C'].width = 11, 8, 30
+                ws.column_dimensions['D'].width, ws.column_dimensions['E'].width, ws.column_dimensions['F'].width, ws.column_dimensions['G'].width = 5, 11, 8, 30
+                for r_idx in range(2, max_r + 2):
+                    if ws.cell(row=r_idx, column=2).value == 'ON': ws.cell(row=r_idx, column=2).fill = gf
+                    elif ws.cell(row=r_idx, column=2).value == 'OFF': ws.cell(row=r_idx, column=2).fill = rf
+                    if ws.cell(row=r_idx, column=6).value == 'ON': ws.cell(row=r_idx, column=6).fill = gf
+                    elif ws.cell(row=r_idx, column=6).value == 'OFF': ws.cell(row=r_idx, column=6).fill = rf
+            else:
+                ws.column_dimensions['A'].width, ws.column_dimensions['B'].width, ws.column_dimensions['C'].width, ws.column_dimensions['D'].width, ws.column_dimensions['E'].width = 13, 27, 13, 13, 21
+    return output.getvalue()
+
+def process_and_zip(all_robot_line_data):
+    # Packages multiple Excel workbooks into a single ZIP file
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+        for line_name, robot_data in all_robot_line_data.items():
+            excel_bytes = generate_excel_bytes(robot_data)
+            zip_file.writestr(f"{line_name}.xlsx", excel_bytes)
+    return zip_buffer.getvalue()
+
+# Application Runners
+def run_zip_processing(uploaded_file):
+    line_data = {} # line_name -> robot_data
+    with zipfile.ZipFile(uploaded_file, 'r') as z:
+        for name in z.namelist():
+            if name.lower().endswith('.ls'):
+                parts = [p for p in name.split('/') if p]
+                if 'LS' in [p.upper() for p in parts]:
+                    ls_idx = [i for i, p in enumerate(parts) if p.upper() == 'LS'][0]
+                    # Line name is the folder above the robot folder? 
+                    # If Backup/YJC MB/602A/LS/file.ls -> parts=['Backup','YJC MB','602A','LS','file.ls']
+                    # robot_name = 602A (idx-1), line_name = YJC MB (idx-2)
+                    robot_name = parts[ls_idx-1] if ls_idx > 0 else "Robot"
+                    line_name = parts[ls_idx-2] if ls_idx > 1 else "Main"
+                else: 
+                    robot_name = parts[-2] if len(parts) > 1 else "Root"
+                    line_name = parts[-3] if len(parts) > 2 else "Main"
+                
+                if line_name not in line_data: line_data[line_name] = {}
                 try:
                     with z.open(name) as f:
                         content = f.read().decode('latin-1', errors='replace')
-                        di_list, do_list = extract_signals_from_text(content)
-                        
-                        if robot_name not in robot_data:
-                            robot_data[robot_name] = {'DI': {}, 'DO': {}}
-                        
-                        for index, comment, state in di_list:
-                            if not comment and not state: continue
-                            curr_comment, curr_state = robot_data[robot_name]['DI'].get(index, ("", ""))
-                            new_comment = comment or curr_comment
-                            new_state = curr_state
-                            prefix_match = re.match(r'^(ON|OFF)\s*:', new_comment, re.IGNORECASE)
-                            if prefix_match:
-                                new_state = prefix_match.group(1).upper()
-                                new_comment = re.sub(r'^(ON|OFF)\s*:\s*', '', new_comment, flags=re.IGNORECASE)
-                            elif state and not new_state: new_state = state
-                            if not curr_comment or new_state or len(new_comment) > len(curr_comment):
-                                robot_data[robot_name]['DI'][index] = (new_comment, new_state)
-                                
-                        for index, comment, state in do_list:
-                            if not comment and not state: continue
-                            curr_comment, curr_state = robot_data[robot_name]['DO'].get(index, ("", ""))
-                            new_comment = comment or curr_comment
-                            new_state = curr_state
-                            prefix_match = re.match(r'^(ON|OFF)\s*:', new_comment, re.IGNORECASE)
-                            if prefix_match:
-                                new_state = prefix_match.group(1).upper()
-                                new_comment = re.sub(r'^(ON|OFF)\s*:\s*', '', new_comment, flags=re.IGNORECASE)
-                            elif state and not new_state: new_state = state
-                            if not curr_comment or new_state or len(new_comment) > len(curr_comment):
-                                robot_data[robot_name]['DO'][index] = (new_comment, new_state)
-                except Exception as e:
-                    st.warning(f"Error reading {name}: {e}")
+                        di_list, do_list = parse_content(content)
+                        update_signal_map(line_data[line_name], robot_name, di_list, do_list)
+                except: pass
+    return line_data
 
-        # Generate Excel in memory
-        output = io.BytesIO()
-        green_fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
-        red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
-        
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            for robot_name, signals in robot_data.items():
-                all_di = signals['DI']
-                all_do = signals['DO']
-                has_state = any(s for _, s in all_di.values()) or any(s for _, s in all_do.values())
-                
-                di_rows = []
-                do_rows = []
-                for i in sorted(all_di.keys()):
-                    comment, state = all_di[i]
-                    if has_state: di_rows.append([f"DI {i}", state, comment])
-                    else: di_rows.append([f"DI {i}", comment])
-                for i in sorted(all_do.keys()):
-                    comment, state = all_do[i]
-                    if has_state: do_rows.append([f"DO {i}", state, comment])
-                    else: do_rows.append([f"DO {i}", comment])
-                
-                if not di_rows and not do_rows: continue
-                
-                # Create DFs
-                if has_state:
-                    df_di = pd.DataFrame(di_rows, columns=['DI', 'State', 'Comment'])
-                    df_do = pd.DataFrame(do_rows, columns=['DO', 'State', 'Comment'])
-                else:
-                    df_di = pd.DataFrame(di_rows, columns=['DI', 'Comment'])
-                    df_do = pd.DataFrame(do_rows, columns=['DO', 'Comment'])
-                    
-                max_rows = max(len(df_di), len(df_do))
-                col_space = pd.DataFrame([''] * max_rows, columns=[' '])
-                df_do_padded = df_do.reindex(range(max_rows)).fillna('')
-                df_di_padded = df_di.reindex(range(max_rows)).fillna('')
-                
-                final_df = pd.concat([df_do_padded, col_space, df_di_padded], axis=1)
-                sheet_name = str(robot_name)[:31]
-                final_df.to_excel(writer, sheet_name=sheet_name, index=False)
-                
-                ws = writer.sheets[sheet_name]
-                if has_state:
-                    ws.column_dimensions['A'].width = 11
-                    ws.column_dimensions['B'].width = 8
-                    ws.column_dimensions['C'].width = 30
-                    ws.column_dimensions['D'].width = 5
-                    ws.column_dimensions['E'].width = 11
-                    ws.column_dimensions['F'].width = 8
-                    ws.column_dimensions['G'].width = 30
-                    for row_idx in range(2, max_rows + 2):
-                        # Col B (DO State) and Col F (DI State)
-                        sv_do = ws.cell(row=row_idx, column=2).value
-                        if sv_do == 'ON': ws.cell(row=row_idx, column=2).fill = green_fill
-                        elif sv_do == 'OFF': ws.cell(row=row_idx, column=2).fill = red_fill
-                        sv_di = ws.cell(row=row_idx, column=6).value
-                        if sv_di == 'ON': ws.cell(row=row_idx, column=6).fill = green_fill
-                        elif sv_di == 'OFF': ws.cell(row=row_idx, column=6).fill = red_fill
-                else:
-                    ws.column_dimensions['A'].width = 13
-                    ws.column_dimensions['B'].width = 27
-                    ws.column_dimensions['C'].width = 13
-                    ws.column_dimensions['D'].width = 13
-                    ws.column_dimensions['E'].width = 21
+def run_local_processing(root_path):
+    line_data = {}
+    exclude = {'build', 'dist', '__pycache__', '.git', '.pytest_cache'}
+    for root, dirs, files in os.walk(root_path):
+        dirs[:] = [d for d in dirs if d not in exclude]
+        if 'LS' in [d.upper() for d in dirs]:
+            # Identify line and robot
+            rel_path = os.path.relpath(root, root_path)
+            parts = [p for p in rel_path.split(os.sep) if p and p != '.']
+            # If root_path is "Backup" and we found "Backup/YJC MB/602A/LS"
+            # rel_path = "YJC MB/602A/LS" -> parts=["YJC MB","602A","LS"]
+            # line_name = parts[0], robot_name = parts[1]
+            line_name = parts[0] if parts else "Main"
+            robot_name = parts[1] if len(parts) > 1 else os.path.basename(root)
+            
+            if line_name not in line_data: line_data[line_name] = {}
+            for file in os.listdir(root):
+                if file.lower().endswith('.ls'):
+                    try:
+                        with open(os.path.join(root, file), 'r', encoding='latin-1', errors='replace') as f:
+                            di_l, do_l = parse_content(f.read())
+                            update_signal_map(line_data[line_name], robot_name, di_l, do_l)
+                    except: pass
+            dirs[:] = [] # stop deep walk for this robot
+    return line_data
 
-        return output.getvalue(), list(robot_data.keys())
-
-# Main App Layout
+# UI Application
 st.title("🤖 Robot Signal Extractor")
-st.markdown("### Professional Industrial I/O Signal Analysis Tool")
-st.write("Upload a `.zip` file of your robot backup to automatically extract DI/DO signals into a formatted Excel table.")
+st.markdown("##### Professional Multi-Line Extraction Tool")
 
-with st.container():
-    uploaded_file = st.file_uploader("Drop your robot backup ZIP here", type="zip")
+t1, t2 = st.tabs(["🚀 Cloud Mode (Zip Upload)", "🏠 Local Mode (Folder Path)"])
 
-if uploaded_file:
-    # Get original filename minus extension
-    base_name = os.path.splitext(uploaded_file.name)[0]
-    
-    with st.spinner("Processing robot signals..."):
-        excel_data, robots_found = process_zip_backup(uploaded_file)
-        
-    if excel_data:
-        st.success(f"✅ Successfully processed {len(robots_found)} robot(s)!")
-        
-        # Display Preview of Robots Found
-        st.write("##### Robots Identified:")
-        st.info(", ".join(robots_found))
-        
-        # Download Button
-        st.download_button(
-            label="📥 Download Excel Signal Table",
-            data=excel_data,
-            file_name=f"{base_name}_Signals.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.error("No valid .ls files found in the ZIP. Please check your backup structure.")
+with t1:
+    up_f = st.file_uploader("Upload robot backup ZIP", type="zip")
+    if up_f:
+        with st.spinner("Processing multiple robot lines..."):
+            line_data = run_zip_processing(up_f)
+            if line_data:
+                st.success(f"Successfully processed {len(line_data)} lines!")
+                for ln, robots in line_data.items(): st.write(f"- **{ln}**: {len(robots)} robots found")
+                zip_bytes = process_and_zip(line_data)
+                st.download_button("📥 Download Separate Excel Files (ZIP)", zip_bytes, f"Signal_Reports_{os.path.splitext(up_f.name)[0]}.zip", "application/zip")
 
-# Footer
+with t2:
+    loc_p = st.text_input("Enter Root Folder Path (e.g. C:\\Backup)", "")
+    if st.button("🚀 Fast Scan Multiple Lines"):
+        if os.path.exists(loc_p):
+            with st.spinner("Scanning directory for all lines..."):
+                line_data = run_local_processing(loc_p)
+                if line_data:
+                    st.success(f"Detected {len(line_data)} robot lines!")
+                    for ln, robots in line_data.items(): st.write(f"- **{ln}**: {len(robots)} robots")
+                    zip_bytes = process_and_zip(line_data)
+                    st.download_button("📥 Download Separate Excel Files (ZIP)", zip_bytes, "MultiLine_Signal_Reports.zip", "application/zip")
+                else: st.error("No valid robot backups found.")
+        else: st.error("Invalid path.")
+
 st.markdown("---")
-st.caption("Powered by Advanced Agentic Automation | Streamlit Deployment Ready")
+st.caption("Powered by Advanced Agentic Automation")
